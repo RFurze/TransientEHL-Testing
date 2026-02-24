@@ -31,28 +31,7 @@ class MetaModel3:
         return scaled_data, data_min, data_max
 
     @staticmethod
-    def _estimate_inv_covariance(points: np.ndarray, reg: float = 1e-8) -> np.ndarray:
-        """Return a regularised inverse covariance matrix for Mahalanobis distance."""
-        n_dim = points.shape[1]
-        if points.shape[0] < 2:
-            return np.eye(n_dim)
-
-        cov = np.cov(points, rowvar=False)
-        cov = np.atleast_2d(cov)
-        if cov.shape != (n_dim, n_dim):
-            return np.eye(n_dim)
-
-        cov_reg = cov + reg * np.eye(n_dim)
-        return np.linalg.pinv(cov_reg)
-
-    @staticmethod
-    def _mahalanobis_distance(a: np.ndarray, b: np.ndarray, inv_cov: np.ndarray) -> np.ndarray:
-        """Mahalanobis distance between points in ``a`` and point ``b``."""
-        diffs = a - b
-        return np.sqrt(np.einsum("...i,ij,...j->...", diffs, inv_cov, diffs))
-
-    @staticmethod
-    def _coverage_fraction(all_points_norm, subset_points_norm, r0, inv_cov):
+    def _coverage_fraction(all_points_norm, subset_points_norm, r0):
         """
         all_points_norm: shape (N, D)
         subset_points_norm: shape (M, D)
@@ -64,15 +43,14 @@ class MetaModel3:
         N = all_points_norm.shape[0]
         covered_count = 0
         for i in range(N):
-            dists = MetaModel3._mahalanobis_distance(
-                subset_points_norm, all_points_norm[i], inv_cov
-            )
+            diffs = subset_points_norm - all_points_norm[i]
+            dists = np.sqrt(np.sum(diffs * diffs, axis=1))
             if np.any(dists <= r0):
                 covered_count += 1
         return covered_count / N
 
     @staticmethod
-    def _choose_r0(all_points_norm: np.ndarray, inv_cov: np.ndarray, q: float = 0.75) -> float:
+    def _choose_r0(all_points_norm: np.ndarray, q: float = 0.75) -> float:
         """
         Return the *q*-quantile of the 1-NN distance distribution
         (k-D tree query with k=2; the first hit is the point itself).
@@ -81,14 +59,8 @@ class MetaModel3:
         """
         if all_points_norm.shape[0] < 2:
             return 0.0
-
-        eigvals, eigvecs = np.linalg.eigh(inv_cov)
-        eigvals = np.clip(eigvals, 0.0, None)
-        transform = eigvecs @ np.diag(np.sqrt(eigvals))
-        transformed = all_points_norm @ transform
-
-        tree = cKDTree(transformed)
-        d, _ = tree.query(transformed, k=2)
+        tree = cKDTree(all_points_norm)
+        d, _ = tree.query(all_points_norm, k=2)
         return float(np.quantile(d[:, 1], q))
 
     def build(self, xi, order, init, theta=None):
@@ -145,21 +117,18 @@ class MetaModel3:
             # ==============================================================
             # INIT MODE: A simple "greedy cover" approach
             # ==============================================================
-            inv_cov = self._estimate_inv_covariance(new_data_norm)
-            r0 = self._choose_r0(new_data_norm, inv_cov, q=1.0 - self.Nd_factor)
+            r0 = self._choose_r0(new_data_norm, q=1.0 - self.Nd_factor)
 
             # --- optional diagnostic histogram --------------------------
-            nn_dists = np.zeros(new_data_norm.shape[0])
-            for i, point in enumerate(new_data_norm):
-                dists = self._mahalanobis_distance(new_data_norm, point, inv_cov)
-                dists[i] = np.inf
-                nn_dists[i] = np.min(dists)
+            tree = cKDTree(new_data_norm)
+            dists, _ = tree.query(new_data_norm, k=2)
+            nn_dists = dists[:, 1]
             plt.figure(figsize=(6, 4))
             plt.hist(nn_dists, bins=50)
             plt.axvline(
                 r0, color="red", linestyle="--", linewidth=1.5, label=rf"$r_0={r0:.3f}$"
             )
-            plt.xlabel("Mahalanobis distance to nearest neighbour")
+            plt.xlabel("Distance to nearest neighbour (normalized)")
             plt.ylabel("Frequency")
             plt.title("NN distance distribution (init)")
             plt.tight_layout()
@@ -175,9 +144,7 @@ class MetaModel3:
                 # remove all points within r0
                 remove_list = []
                 for j in indices_left:
-                    dist = self._mahalanobis_distance(
-                        new_data_norm[j][None, :], center, inv_cov
-                    )[0]
+                    dist = np.linalg.norm(new_data_norm[j] - center)
                     # dist = weighted_distance(new_data_norm[j], center, weight_f=1.0) #weighted to f
                     if dist <= r0:
                         remove_list.append(j)
@@ -186,7 +153,7 @@ class MetaModel3:
             chosen_centers = np.array(chosen_centers, dtype=float)  # shape (M,6)
 
             # Coverage fraction w.r.t. new_data_norm
-            frac_init = self._coverage_fraction(new_data_norm, chosen_centers, r0, inv_cov)
+            frac_init = self._coverage_fraction(new_data_norm, chosen_centers, r0)
             logging.info(
                 f"[INIT] Coverage fraction of new data by chosen set = {frac_init:.3f}"
             )
@@ -289,28 +256,25 @@ class MetaModel3:
             )
 
             all_norm = np.vstack([existing_norm, new_data_norm])
-            inv_cov = self._estimate_inv_covariance(all_norm)
-            r0 = self._choose_r0(all_norm, inv_cov, q=1.0 - self.Nd_factor)
+            r0 = self._choose_r0(all_norm, q=1.0 - self.Nd_factor)
 
             # optional diagnostic plot (use new batch only)
-            nn_dists = np.zeros(new_data_norm.shape[0])
-            for i, point in enumerate(new_data_norm):
-                dists = self._mahalanobis_distance(new_data_norm, point, inv_cov)
-                dists[i] = np.inf
-                nn_dists[i] = np.min(dists)
+            tree = cKDTree(new_data_norm)
+            dists, _ = tree.query(new_data_norm, k=2)
+            nn_dists = dists[:, 1]
             plt.figure(figsize=(6, 4))
             plt.hist(nn_dists, bins=50)
             plt.axvline(
                 r0, color="red", linestyle="--", linewidth=1.5, label=rf"$r_0={r0:.3f}$"
             )
-            plt.xlabel("Mahalanobis distance to nearest neighbour")
+            plt.xlabel("Distance to nearest neighbour (normalized)")
             plt.ylabel("Frequency")
             plt.title("NN distance distribution (update)")
             plt.tight_layout()
             plt.savefig("T_nn_distance_histogram_update.png")
             plt.close()
 
-            frac_before = self._coverage_fraction(new_data_norm, existing_norm, r0, inv_cov)
+            frac_before = self._coverage_fraction(new_data_norm, existing_norm, r0)
             logging.info(f"[UPDATE] Coverage fraction BEFORE = {frac_before:.3f}")
 
             accepted_indices = []
@@ -318,12 +282,14 @@ class MetaModel3:
             for i in range(new_data_norm.shape[0]):
                 # distance to each existing center in 6D
                 candidate = new_data_norm[i]
-                dist_existing = self._mahalanobis_distance(existing_norm, candidate, inv_cov)
+                dist_existing = weighted_distance(
+                    existing_norm, candidate, weight_f=1.0
+                )
 
                 # distance to previously accepted new points
                 if len(accepted_norm_pts) > 0:
-                    dist_new = self._mahalanobis_distance(
-                        np.asarray(accepted_norm_pts), candidate, inv_cov
+                    dist_new = weighted_distance(
+                        np.asarray(accepted_norm_pts), candidate, weight_f=1.0
                     )
                 else:
                     dist_new = np.array([np.inf])
@@ -401,7 +367,7 @@ class MetaModel3:
                 [Hx, Px, Ux, Vx, dx, dy, dHdx, dHdy, Hdotx, Pdotx]
             )
             frac_after = self._coverage_fraction(
-                new_data_norm, existing_norm_updated, r0, inv_cov
+                new_data_norm, existing_norm_updated, r0
             )
             logging.info(f"[UPDATE] Coverage fraction AFTER = {frac_after:.3f}")
 

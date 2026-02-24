@@ -8,14 +8,14 @@ Workflow implemented in this script:
 4) Run MLS prediction at all non-downsampled points (same solver core as ``run_MLS``).
 5) Measure error against the true 1:1 results and report the best ND/theta combination.
 
-python3 optimise_ndtheta_mls.py \
+python3 -m analysis.src.optimise_ndtheta_mls \
   --output_dir OneToOne/ \
   --transient \
-  --nd_factors "0.2,0.3,0.4,0.5,0.6" \
-  --theta_values "1000,2000,3000,4000,5000" \
-  --k_neighbors 200 \
+  --nd_factors "0.2, 0.5,0.6" \
+  --theta_values "1000, 5000, 10000" \
+  --k_neighbors 500 \
   --w_thresh 1e-3 \
-  --match_tol 1e-12 \
+  --match_tol 1e-5 \
   
 """
 
